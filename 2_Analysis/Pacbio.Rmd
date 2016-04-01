@@ -1,0 +1,812 @@
+---
+title: "Pacbio Phage Analysis"
+author: "Eric Z Chen"
+date: "September 30, 2015"
+output: 
+  html_document: 
+    number_sections: yes
+    toc: yes
+---
+
+Rick: I'm writing to follow up on the possible use of Kmer analysis in analyzing PacBio sequencing data for motifs assocaited with covalent DNA modification.  The PacBio sequencing method involves single DNA molecules traversing along single immobilized polymerase molecules.  The method is sensitive to covalent modification fo DNA, which results in altered kinetics of polymerization. We have been trying to apply this to metagenomic bacteriophage samples.  Phage are known to engage in more than 10 forms of covalent DNA modification. Our metagenomic data is low coverage and noisy.  It might help pull out the signal to search within motifs.  That is, the A of GATC is known to be modified in many organisms.  If we focused on the A in GATC, we would see a strong signal in some contigs.  Modification is often sequence specific, but we do not always know the sequences involved in metagenomic samples. Thus it would be great to test all 2mers, 3mers…etc against all contigs, and tabulate each base within each Nmer to check for altered kinetics.  We would also test data on control DNA where we are sure there are no mutations as a control.  We would tabulate those motifs with altered kinetics, and show that these were rare in control data.  This would provide a set of new specificities for DNA modifying enzymes encoded in phage genomes, data which could find many uses.
+```{r setup, results='hide',warning=FALSE,message=FALSE}
+library(knitr)
+library(mixtools)
+library(stringr)
+library(ggplot2)
+#devtools::install_github("chvlyl/metakit")
+library(metakit)
+library(pROC)
+library(readr)
+library(randomForest)
+library(tidyr)
+library(dplyr)
+```
+
+```{r note, eval=FALSE}
+1. Include the second bacterial data
+2. Remove the repeat sequences (lower letter) 
+3. Remove short contig
+4. Take a log transformation
+5. Fit Laplacian mixture model
+
+Remove sequences at the begnning and the end
+Remove short contigs
+Remove contigs with high GC>95%: unitig_336
+```
+
+
+### Raw data
+```{r load_data,cache=TRUE,eval=TRUE,cache.lazy=FALSE}
+#################
+### Error: "large vector not supported"
+### update the knitr and rmarkdown packages
+#################
+
+###################################
+### load control T4 phage sequences
+t4.phage.seq <- read_tsv(file='../0_Data/Processed_Data/1_T4_phage_all.fasta.table', col_names = c('ID','Seq'))
+apply(t4.phage.seq[,2],1,nchar)
+## [1] 168922 166816 165660 168922
+## The four phage genomes are different
+## Use their correpsonding genome sequence in the analysis
+
+### load control T4 phage IPD
+T4GlcHMC.ipd <- read_tsv(file='../0_Data/Processed_Data/1_T4_Phage_GlcHMC.txt', col_names = TRUE)
+T4HMC.ipd <- read_tsv(file='../0_Data/Processed_Data/2_T4_Phage147_HMC.txt', col_names = TRUE)
+T4C.ipd <- read_tsv(file='../0_Data/Processed_Data/3_T4_PhageGT7_C.txt', col_names = TRUE)
+T4WGA.ipd <- read_tsv(file='../0_Data/Processed_Data/4_T4_Phage_WGA.txt', col_names = TRUE)
+
+###################
+### load phage IPD
+###  [1] "refName"         "tpl"             "strand"          "base"       ### [5] "score"           "tMean"           "tErr"            "modelPrediction"
+### [9] "ipdRatio"        "coverage"        "frac"            "fracLow"     ### [13] "fracUp"  
+
+#########
+## 0 is Fwd strand
+
+
+## phage 1
+phage1.seq <- read_tsv(file='../0_Data/Processed_Data/5_Phage1.table', col_names = c('ID','Seq'))
+apply(phage1.seq[,2],1,nchar) %>% sort
+  
+## phage 1
+phage1.ipd <- read_csv(file='../0_Data/Processed_Data/5_Phage1.csv', col_names = TRUE)
+phage1.ipd <- phage1.ipd %>%
+dplyr::rename(ID=refName,Pos=tpl,Strand=strand,Base=base,Score=score,
+              IPDRatio=ipdRatio,Cov=coverage) %>%
+dplyr::mutate(Strand=ifelse(Strand==0,'Fwd','Rev')) %>%
+dplyr::mutate(Type='Phage1') %>%
+dplyr::select(Type, ID, Pos, Strand, Base, Cov, IPDRatio, Score) 
+
+
+## phage 2
+phage2.ipd <- read_csv(file='../0_Data/Processed_Data/6_Phage2.csv', col_names = TRUE)
+phage2.ipd <- phage2.ipd %>%
+dplyr::rename(ID=refName,Pos=tpl,Strand=strand,Base=base,Score=score,
+              IPDRatio=ipdRatio,Cov=coverage) %>%
+dplyr::mutate(Strand=ifelse(Strand==0,'Fwd','Rev')) %>%
+dplyr::mutate(Type='Phage2') %>%
+dplyr::select(Type, ID, Pos, Strand, Base, Cov, IPDRatio, Score)
+
+
+### bact 1
+bact1.ipd <- read_csv(file='../0_Data/Processed_Data/7_Bacteria1.csv', col_names = TRUE)
+bact1.ipd <- bact1.ipd %>%
+dplyr::rename(ID=refName,Pos=tpl,Strand=strand,Base=base,Score=score,
+              IPDRatio=ipdRatio,Cov=coverage) %>%
+dplyr::mutate(Strand=ifelse(Strand==0,'Fwd','Rev')) %>%
+dplyr::mutate(Type='Bact1') %>%
+dplyr::select(Type, ID, Pos, Strand, Base, Cov, IPDRatio, Score)
+ 
+### bact 2
+bact2.ipd <- read_csv(file='../0_Data/Processed_Data/8_Bacteria2.csv', col_names = TRUE)
+bact2.ipd <- bact2.ipd %>%
+dplyr::rename(ID=refName,Pos=tpl,Strand=strand,Base=base,Score=score,
+              IPDRatio=ipdRatio,Cov=coverage) %>%
+dplyr::mutate(Strand=ifelse(Strand==0,'Fwd','Rev')) %>%
+dplyr::mutate(Type='Bact2') %>%
+dplyr::select(Type, ID, Pos, Strand, Base, Cov, IPDRatio, Score)
+
+#################
+### combine T4 IPD
+ipd.raw <- rbind(
+data.frame(Type='T4', ID='T4GlcHMC',T4GlcHMC.ipd,stringsAsFactors =FALSE),
+data.frame(Type='T4',ID='T4HMC',T4HMC.ipd,stringsAsFactors =FALSE),
+data.frame(Type='T4',ID='T4C',T4C.ipd,stringsAsFactors =FALSE),
+## negative control
+data.frame(Type='T4',ID='T4WGA',T4WGA.ipd,stringsAsFactors =FALSE)
+)
+ 
+### transformation
+ipd <- ipd.raw %>%
+tidyr::gather(Var,Value,-Type,-ID,-Pos) %>%
+tidyr::separate(Var, into = c("Varable", "Strand"), sep = "_") %>%
+tidyr::spread(Varable,Value,convert=TRUE)  %>%
+dplyr::mutate(IPDRatio=abs(as.numeric(IPDRatio)))
+
+### check column names
+identical(colnames(ipd),colnames(phage1.ipd))
+identical(colnames(ipd),colnames(phage2.ipd))
+identical(colnames(ipd),colnames(bact1.ipd))
+identical(colnames(ipd),colnames(bact2.ipd))
+##Type,ID,Pos,Strand,Base,Cov,IPDRatio,Score
+
+### rbind does not work when generating html file
+ipd <- rbind(ipd, phage1.ipd, phage2.ipd, bact1.ipd,bact2.ipd)
+write_tsv(ipd,path='../0_Data/Merged_IPD/ipd_merged.txt')
+```
+
+
+
+```{r check_outliers}
+
+## C in GlcHMC are all modified
+## WGA no modification
+
+## T4C
+ipd %>% dplyr::filter(Type=='T4C') %>%
+#dplyr::filter(Strand=='Fwd') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+## T4WGA
+ipd %>% dplyr::filter(Type=='T4WGA') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+## T4GlcHMC
+ipd %>% dplyr::filter(Type=='T4GlcHMC') %>%
+#dplyr::filter(Strand=='Fwd') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+## T4HMC
+ipd %>% dplyr::filter(Type=='T4HMC') %>%
+#dplyr::filter(Strand=='Fwd') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+
+## Phage1
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base) + xlim(0,5)
+
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+ggplot( aes(log10(IPDRatio), fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+## Phage2
+ipd %>% dplyr::filter(Type=='Phage2') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+ipd %>% dplyr::filter(Type=='Phage2') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base) + xlim(0,5)
+
+ipd %>% dplyr::filter(Type=='Phage2') %>%
+ggplot( aes(log10(IPDRatio), fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+
+## Bact1
+ipd %>% dplyr::filter(Type=='Bact1') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+ipd %>% dplyr::filter(Type=='Bact1') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base) + xlim(0,5)
+
+ipd %>% dplyr::filter(Type=='Bact1') %>%
+ggplot( aes(log10(IPDRatio), fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+
+## all
+ipd %>% dplyr::filter(ID=='T4') %>%
+#dplyr::filter(Strand=='Fwd') %>%
+ggplot( aes(IPDRatio, fill = Type)) +geom_density(alpha = 0.2) +
+xlim(0,5) + facet_grid(Strand~ Base)
+
+## log transformation
+ipd %>% dplyr::filter(ID=='T4') %>%
+#dplyr::filter(Strand=='Fwd') %>%
+ggplot( aes(log10(IPDRatio), fill = Type)) +geom_density(alpha = 0.2) +
+facet_grid(Strand~ Base)
+
+
+
+############
+## Outliers
+## 1. At the beginning and end of the sequence
+#############
+
+
+## T4WGA
+ipd %>% dplyr::filter(Type=='T4WGA') %>%
+ggplot( aes(IPDRatio, fill = Base)) + geom_bar(binwidth = 0.1, position="dodge")
+
+ipd %>% dplyr::filter(Type=='T4WGA') %>%
+top_n(20, IPDRatio)
+
+outlier.pos <- ipd %>% dplyr::filter(Type=='T4WGA') %>%
+top_n(20, IPDRatio) %>%
+dplyr::select(Pos) 
+
+
+t4.phage.seq[4,2] %>%
+str_sub(start=outlier.pos$Pos-3,end=outlier.pos$Pos+3)
+## outliers at the beginning and the end of the sequence
+
+######
+## T4C
+ipd %>% dplyr::filter(Type=='T4C') %>%
+ggplot( aes(IPDRatio, fill = Base)) + geom_bar(binwidth = 0.1, position="dodge")
+
+ipd %>% dplyr::filter(Type=='T4C') %>%
+top_n(20, IPDRatio) 
+
+ipd %>% dplyr::filter(Type=='T4C' & Base=='C') %>%
+top_n(20, IPDRatio) 
+
+
+outlier.pos <- ipd %>% dplyr::filter(Type=='T4C') %>%
+top_n(20, IPDRatio) %>%
+dplyr::select(Pos) 
+
+
+t4.phage.seq[3,2] %>%
+str_sub(start=outlier.pos$Pos,end=outlier.pos$Pos+6)
+
+
+######
+## T4HMC
+ipd %>% dplyr::filter(Type=='T4HMC') %>%
+ggplot( aes(IPDRatio, fill = Base)) +geom_density(alpha = 0.2)
+
+ipd %>% dplyr::filter(Type=='T4HMC') %>%
+top_n(20, IPDRatio) 
+
+outlier.pos <- ipd %>% dplyr::filter(Type=='T4HMC') %>%
+top_n(20, IPDRatio) %>%
+dplyr::select(Pos) 
+
+
+t4.phage.seq[2,2] %>%
+str_sub(start=outlier.pos$Pos-2,end=outlier.pos$Pos+6)
+
+
+######
+## T4GlcHMC
+
+ipd %>% dplyr::filter(Type=='T4GlcHMC') %>%
+ggplot( aes(IPDRatio, fill = Base)) +geom_density(alpha = 0.2)
+
+ipd %>% dplyr::filter(Type=='T4GlcHMC') %>%
+top_n(20, IPDRatio) 
+
+
+outlier.pos <- ipd %>% dplyr::filter(Type=='T4GlcHMC') %>%
+top_n(20, IPDRatio) %>%
+dplyr::select(Pos) 
+
+
+t4.phage.seq[1,2] %>%
+str_sub(start=outlier.pos$Pos,end=outlier.pos$Pos+6)
+
+
+######
+## phage1
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+ggplot( aes(IPDRatio, fill = Base)) +geom_density(alpha = 0.2)
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+ggplot( aes(IPDRatio, fill = Base)) +geom_density(alpha = 0.2)+
+xlim(0,5)
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+dplyr::filter(IPDRatio>2) %>%
+ggplot( aes(IPDRatio, fill = Base)) +geom_density(alpha = 0.2)
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+ggplot( aes(log10(IPDRatio), fill = Base)) +geom_density(alpha = 0.2)
+
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+top_n(20, IPDRatio) 
+
+
+ipd %>% dplyr::filter(Type=='Phage1') %>%
+top_n(20, IPDRatio) 
+
+phage1.seq %>% dplyr::mutate(len=nchar(Seq)) %>% dplyr::select(-Seq) %>%
+dplyr::filter(ID=='unitig_984|q3')
+
+phage1.seq[phage1.seq$ID=='unitig_488|q3','Seq'] %>% nchar
+
+phage1.seq[phage1.seq$ID=='unitig_488|q3','Seq'] %>%
+str_sub(start=602,end=602)
+
+phage1.seq[phage1.seq$ID=='unitig_984|q3','Seq'] %>%
+str_sub(start=307-10,end=307+10)
+
+
+```
+
+
+
+```{r  delete_temporary_data}
+rm(T4GlcHMC.ipd)
+rm(T4HMC.ipd)
+rm(T4C.ipd)
+rm(T4WGA.ipd)
+rm(phage1.ipd)
+rm(phage2.ipd)
+rm(bact1.ipd)
+rm(bact2.ipd)
+rm(ipd.raw)
+```
+
+
+
+```{r plot_data,eval=FALSE}
+plot_ipd = function(pdata){
+### IPD by strand
+plot(ggplot(pdata, aes(IPDRatio, fill = Strand)) + geom_density(alpha = 0.2))
+plot(ggplot(pdata, aes(IPDRatio, fill = Strand)) + geom_bar(binwidth = 0.1, position="dodge"))
+plot(ggplot(pdata, aes(y=IPDRatio, x = Strand)) + geom_boxplot())
+### IPD by base
+plot(ggplot(pdata, aes(IPDRatio, fill = Base)) + geom_density(alpha = 0.2))
+plot(ggplot(pdata, aes(IPDRatio, fill = Base)) + geom_bar(binwidth = 0.1, position="dodge"))
+plot(ggplot(pdata, aes(y=IPDRatio, x = Base)) + geom_boxplot())
+### Cov by strand
+plot(ggplot(pdata, aes(Cov, fill = Strand)) + geom_density(alpha = 0.2))
+plot(ggplot(pdata, aes(Cov, fill = Strand)) + geom_bar(binwidth = 0.1, position="dodge"))
+plot(ggplot(pdata, aes(y=Cov, x = Strand)) + geom_boxplot())
+### Cov by base
+plot(ggplot(pdata, aes(Cov, fill = Base)) + geom_density(alpha = 0.2))
+plot(ggplot(pdata, aes(Cov, fill = Base)) + geom_bar(binwidth = 0.1, position="dodge"))
+plot(ggplot(pdata, aes(y=Cov, x = Base)) + geom_boxplot())
+### Cov IPD
+plot(ggplot(pdata, aes(Cov, IPDRatio,color=Strand)) + geom_point())
+plot(ggplot(pdata, aes(Cov, IPDRatio,color=Base)) + geom_point())
+### Score IPD
+plot(ggplot(pdata, aes(Score, IPDRatio,color=Strand)) + geom_point())
+plot(ggplot(pdata, aes(Score, IPDRatio,color=Base)) + geom_point())
+}
+
+
+######################################
+### WGA
+ipd %>% dplyr::filter(Type=='T4WGA') %>%
+plot_ipd()
+
+######################################
+### HMC
+ipd %>% dplyr::filter(ID=='T4HMC') %>%
+plot_ipd
+
+######################################
+### GlcHMC
+ipd %>% dplyr::filter(ID=='T4GlcHMC') %>%
+plot_ipd
+
+######################################
+### C
+ipd %>% dplyr::filter(ID=='T4C') %>%
+plot_ipd
+
+####################################
+### compare four T4 phages
+ipd  %>% dplyr::filter(Type=='T4') %>%
+(function(pdata){
+### IPD by type and base
+plot(ggplot(pdata, aes(IPDRatio, fill = ID)) + geom_density(alpha = 0.2) + facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(IPDRatio, fill = ID)) + geom_bar(binwidth = 0.1, position="dodge")+ facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(y=IPDRatio, x = ID)) + geom_boxplot()+ facet_grid(. ~ Base))
+})
+ 
+### C in T4C vs. T4WGA
+ipd  %>% dplyr::filter(Base=='C' & (ID=='T4C'|ID=='T4WGA')) %>%
+(function(pdata){
+### IPD by type and base
+plot(ggplot(pdata, aes(IPDRatio, fill = ID)) + geom_density(alpha = 0.2) + facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(IPDRatio, fill = ID)) + geom_bar(binwidth = 0.1, position="dodge")+ facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(y=IPDRatio, x = ID)) + geom_boxplot()+ facet_grid(. ~ Base))
+### Cov IPD
+plot(ggplot(pdata, aes(Cov, IPDRatio)) + geom_point()+ facet_grid(. ~ Base))
+})
+
+### large IPDRatio in T4WGA
+ipd  %>% dplyr::filter(ID=='T4WGA' & IPDRatio>2) 
+
+
+### large IPDRatio in T4WGA
+### qqplot 
+ipd  %>% dplyr::filter(ID=='T4WGA') %>%
+(function(pdata){
+plot(ggplot(pdata,aes(sample=IPDRatio))+stat_qq(distribution = qnorm)+ facet_grid(. ~ Base)+ggtitle('Nomral'))
+plot(ggplot(pdata,aes(sample=IPDRatio))+stat_qq(distribution = qlnorm)+ facet_grid(. ~ Base)+ggtitle('LogNomral'))
+})
+
+### A in T4C
+ipd  %>% dplyr::filter(Base=='A' & ID=='T4C') %>%
+(function(pdata){
+### IPD by type and base
+plot(ggplot(pdata, aes(IPDRatio, fill = ID)) + geom_density(alpha = 0.2) + facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(log10(IPDRatio), fill = ID)) + geom_density(alpha = 0.2) + facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(IPDRatio, fill = ID)) + geom_bar(binwidth = 0.1, position="dodge")+ facet_grid(. ~ Base))
+plot(ggplot(pdata, aes(y=IPDRatio, x = ID)) + geom_boxplot()+ facet_grid(. ~ Base))
+### Cov IPD
+plot(ggplot(pdata, aes(Cov, IPDRatio)) + geom_point()+ facet_grid(. ~ Base))
+})
+
+
+
+#########################################################
+### all by type and base
+ipd %>% dplyr::select(Type,Base,Strand,IPDRatio) %>%
+(function(pdata){
+### raw in (0,10)
+plot(ggplot(pdata, aes(IPDRatio, fill = Strand)) + geom_density(alpha = 0.2)+ facet_grid(Type ~ Base)+xlim(0,10))
+### log10
+plot(ggplot(pdata, aes(log10(IPDRatio), fill = Strand)) + geom_density(alpha = 0.2)+ facet_grid(Type ~ Base))
+})
+
+### large values type and base
+ipd %>% dplyr::filter(IPDRatio > 3) %>%
+dplyr::select(Type,Base,Strand,IPDRatio) %>%
+(function(pdata){
+### raw in (0,10)
+plot(ggplot(pdata, aes(IPDRatio, fill = Strand)) + geom_density(alpha = 0.2)+ facet_grid(Type ~ Base)+xlim(0,10))
+### log10
+plot(ggplot(pdata, aes(log10(IPDRatio), fill = Strand)) + geom_density(alpha = 0.2)+ facet_grid(Type ~ Base))
+})
+```
+
+
+```{r phage_t4_gatc_in_c_vs_wga,eval=FALSE}
+extract_ipd = function(ipd, id,  match.pos, match.base=NULL, str='Fwd'){
+  ## "ID"       "Pos"      "Strand"   "Base"     "Cov"      "IPDRatio" "Score"
+  ipd.select <- 
+  ipd %>% dplyr::filter(ID==id) %>%
+  dplyr::filter(Pos %in% match.pos) %>%
+  dplyr::filter(Strand==str) %>% 
+  dplyr::select(IPDRatio, Cov, Score)
+  return(ipd.select)
+}
+
+### Positive and negative controls have the same sequence
+match.pos <- str_locate_all(pattern ='GATC',ctrl.seq$Seq[1])[[1]][,'start']
+
+### positive controls
+g.ipd = extract_ipd(ipd=ipd, id='T4C', match.pos=match.pos, str='Fwd')
+a.ipd = extract_ipd(ipd=ipd, id='T4C', match.pos=match.pos+1, str='Fwd')
+t.ipd = extract_ipd(ipd=ipd, id='T4C', match.pos=match.pos+2, str='Fwd')
+c.ipd = extract_ipd(ipd=ipd, id='T4C', match.pos=match.pos+3, str='Fwd')
+t4c.gatc <- data.frame(g=g.ipd,a=a.ipd,t=t.ipd,c=c.ipd,stringsAsFactors =FALSE)
+
+### negative controls
+g.ipd = extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos, str='Fwd')
+a.ipd = extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+1, str='Fwd')
+t.ipd = extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+2, str='Fwd')
+c.ipd = extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+3, str='Fwd')
+t4wga.gatc <- data.frame(g=g.ipd,a=a.ipd,t=t.ipd,c=c.ipd,stringsAsFactors =FALSE)
+
+### combine them together
+gatc.features <- rbind(
+cbind(type='pos.ctrl',t4c.gatc),
+cbind(type='neg.ctrl',t4wga.gatc)
+)
+
+
+### random forest
+cutoff <- 0.6
+rf.gatc <- random_forest(gatc.features[,colnames(gatc.features)!='type'], 
+               gatc.features[,'type',drop=FALSE],
+               plot.MDS=TRUE,plot.importance=TRUE,print.result=TRUE,
+               guess.num=0,boxplot.top=12,cutoff=c(cutoff,1-cutoff),
+               title="A in GATC",boxplot.y="",ntree=1000,
+               seed=10)
+
+```
+
+
+```{r phage_t4_gatc_in_glchmc_vs_wga,eval=FALSE}
+extract_ipd = function(ipd, id,  match.pos, match.base=NULL, str='Fwd'){
+  ## "ID"       "Pos"      "Strand"   "Base"     "Cov"      "IPDRatio" "Score"
+  ipd.select <- 
+  ipd %>% dplyr::filter(ID==id) %>%
+  dplyr::filter(Pos %in% match.pos) %>%
+  dplyr::filter(Strand==str) %>% 
+  dplyr::select(IPDRatio, Cov, Score)
+  return(ipd.select)
+}
+
+### Positive and negative controls have the same sequence
+match.pos <- str_locate_all(pattern ='GATC',ctrl.seq$Seq[1])[[1]][,'start']
+
+### positive controls
+g.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos+3, str='Rev')
+        )
+a.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos+1, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos+2, str='Rev')
+        )
+t.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos+2, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos+1, str='Rev')
+        )
+c.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos+3, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4GlcHMC', match.pos=match.pos, str='Rev')
+        )
+t4c.gatc <- data.frame(g=g.ipd,a=a.ipd,t=t.ipd,c=c.ipd,stringsAsFactors =FALSE)
+
+### negative controls
+g.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+3, str='Rev')
+        )
+a.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+1, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+2, str='Rev')
+        )
+t.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+2, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+1, str='Rev')
+        )
+c.ipd = rbind(
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos+3, str='Fwd'),
+        extract_ipd(ipd=ipd, id='T4WGA', match.pos=match.pos, str='Rev')
+        )
+t4wga.gatc <- data.frame(g=g.ipd,a=a.ipd,t=t.ipd,c=c.ipd,stringsAsFactors =FALSE)
+
+### combine them together
+gatc.features <- rbind(
+cbind(type='pos.ctrl',t4c.gatc),
+cbind(type='neg.ctrl',t4wga.gatc)
+)
+
+
+### random forest
+cutoff <- 0.6
+rf.a.in.gatc.glchmc <- random_forest(gatc.features[,colnames(gatc.features)!='type'], 
+               gatc.features[,'type',drop=FALSE],
+               plot.MDS=TRUE,plot.importance=TRUE,print.result=TRUE,
+               guess.num=0,boxplot.top=12,cutoff=c(cutoff,1-cutoff),
+               title="A-in-GATC T4GlcHMC vs. T4WGA",boxplot.y="",ntree=1000,
+               seed=10)
+
+####
+roc.data <- data.frame(Label=rf.a.in.gatc.glchmc$y,rf.a.in.gatc.glchmc$votes[,1,drop=F])  %>%
+dplyr::rename(RandomForest=pos.ctrl) %>%
+dplyr::mutate(Label=ifelse(Label=='pos.ctrl',1,0))
+
+roc<-plot.roc(roc.data[,"Label",drop=TRUE], 
+              roc.data[,"RandomForest",drop=TRUE], 
+         main="A-in-GATC T4C vs. T4WGA", 
+         percent=TRUE, col="#e41a1c",type="n",
+         print.auc=TRUE,print.auc.pattern="RandomForest AUC:%.1f%%",
+         #print.thres=TRUE,
+         print.auc.col="#e41a1c",print.auc.y=40)
+lines(smooth(roc, method = "binormal"), col="#e41a1c")
+legend("bottomright", legend = c("NormalMix"), 
+       col = c("#e41a1c"),lwd = 2)
+
+```
+
+
+
+```{r fit_mix_model_normal,eval=FALSE}
+ipd.filter <- read_tsv(file='../0_Data/Merged_IPD/ipd_merged_filter.txt', col_names = TRUE)
+
+
+fit_normal_mixture=function(Phage1.ipd){
+  Phage1.ipd <- data.frame(Index=1:nrow(Phage1.ipd),Phage1.ipd)
+  ##
+  a.ipd <- Phage1.ipd  %>% dplyr::filter(Base=='A')  %>% dplyr::select(Index,IPDRatio)
+  cutoff <- a.ipd %>% top_n(10,IPDRatio) %>% select(IPDRatio) %>% min
+  a.ipd <- a.ipd %>% dplyr::filter(IPDRatio < cutoff)
+  a.mfit <- normalmixEM(a.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+  a.ipd  <- a.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(a.ipd, .)
+  summary(a.mfit)
+  plot(a.mfit,which=2)
+  ##
+  t.ipd <- Phage1.ipd %>% dplyr::filter(Base=='T')  %>% dplyr::select(Index,IPDRatio)
+  cutoff <- t.ipd %>% top_n(10,IPDRatio) %>% select(IPDRatio) %>% min
+  t.ipd <- t.ipd %>% dplyr::filter(IPDRatio < cutoff)
+  t.mfit <- normalmixEM(t.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+  t.ipd  <- t.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(t.ipd, .)
+  summary(t.mfit)
+  plot(t.mfit,which=2)
+  ##
+  c.ipd <- Phage1.ipd  %>% dplyr::filter(Base=='C')  %>% dplyr::select(Index,IPDRatio)
+  cutoff <- c.ipd %>% top_n(10,IPDRatio) %>% select(IPDRatio) %>% min
+  c.ipd <- c.ipd %>% dplyr::filter(IPDRatio < cutoff)
+  c.mfit <- normalmixEM(c.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+  c.ipd  <- c.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(c.ipd, .)
+  summary(c.mfit)
+  plot(c.mfit,which=2)
+  ##
+  g.ipd <- Phage1.ipd  %>% dplyr::filter(Base=='G')  %>% dplyr::select(Index,IPDRatio)
+  cutoff <- g.ipd %>% top_n(10,IPDRatio) %>% select(IPDRatio) %>% min
+  g.ipd <- g.ipd %>% dplyr::filter(IPDRatio < cutoff)
+  g.mfit <- normalmixEM(g.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+  g.ipd  <- g.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(g.ipd, .)
+  summary(g.mfit)
+  plot(g.mfit,which=2)
+  ###
+  atcg.ipd <- rbind(a.ipd,t.ipd,c.ipd,g.ipd)
+  identical(nrow(Phage1.ipd),nrow(atcg.ipd))
+  ###
+  Phage1.ipd <- Phage1.ipd %>% 
+    left_join(atcg.ipd%>%dplyr::select(-IPDRatio),by=c('Index'='Index')) %>% 
+    dplyr::rename(unmodified.norm=unmodified,modified.norm=modified)
+  
+  
+  rm(a.ipd)
+  rm(t.ipd)
+  rm(g.ipd)
+  rm(c.ipd)
+  rm(atcg.ipd)
+  rm(a.mfit)
+  rm(t.mfit)
+  rm(g.mfit)
+  rm(c.mfit)
+  
+  return(Phage1.ipd)
+}
+
+
+### phage1
+T4.ipd <- ipd.filter %>% dplyr::filter(Type=='T4') 
+write_tsv(fit_normal_mixture(T4.ipd),
+          path='../0_Data/Normal_Mixture_Model/Normal_Mixeture_Model_Fitting_Result_T4.txt')
+
+Phage1.ipd <- ipd.filter %>% dplyr::filter(Type=='Phage1') 
+write_tsv(fit_normal_mixture(Phage1.ipd),
+          path='../0_Data/Normal_Mixture_Model/Normal_Mixeture_Model_Fitting_Result_Phage1.txt')
+Phage2.ipd <- ipd.filter %>% dplyr::filter(Type=='Phage2') 
+write_tsv(fit_normal_mixture(Phage2.ipd),
+          path='../0_Data/Normal_Mixture_Model/Normal_Mixeture_Model_Fitting_Result_Phage2.txt')
+Bact1.ipd <- ipd.filter %>% dplyr::filter(Type=='Bact1') 
+write_tsv(fit_normal_mixture(Bact1.ipd),
+          path='../0_Data/Normal_Mixture_Model/Normal_Mixeture_Model_Fitting_Result_Bact1.txt')
+Bact2.ipd <- ipd.filter %>% dplyr::filter(Type=='Bact2') 
+write_tsv(fit_normal_mixture(Bact2.ipd),
+          path='../0_Data/Normal_Mixture_Model/Normal_Mixeture_Model_Fitting_Result_Bact2.txt')
+```
+
+
+```{r fit_mix_model_log_normal,eval=FALSE}
+### zeros in the IPDRatio
+### set them to unmodified
+
+ipd.mix <- data.frame(Index=1:nrow(ipd),ipd)
+
+### phage1
+a.ipd <- ipd.mix  %>% dplyr::filter(Type=='Phage1' & Base=='A') %>%
+  #dplyr::filter(IPDRatio<5) %>%
+  #dplyr::filter(IPDRatio>0) %>%
+  #dplyr::mutate(IPDRatio=log(IPDRatio)) %>%  
+dplyr::select(Index,IPDRatio)
+a.ipd %>% ggplot(aes(IPDRatio)) +geom_density(alpha = 0.2)
+a.mfit <- normalmixEM(a.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+a.ipd  <- a.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(a.ipd, .)
+summary(a.mfit)
+
+
+plot(a.mfit,which=2)
+
+
+t.ipd <- ipd.mix  %>% dplyr::filter(Base=='T') %>% dplyr::mutate(IPDRatio=log10(IPDRatio)) %>% dplyr::select(Index,IPDRatio)
+t.mfit <- normalmixEM(t.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+t.ipd  <- t.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(t.ipd, .)
+summary(t.mfit)
+
+c.ipd <- ipd.mix  %>% dplyr::filter(Type=='Phage1' &Base=='C') %>%
+  dplyr::filter(IPDRatio<5) %>%
+  #dplyr::filter(IPDRatio>0) %>%
+  #dplyr::mutate(IPDRatio=log10(IPDRatio)) %>% 
+  dplyr::select(Index,IPDRatio)
+c.mfit <- normalmixEM(c.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+c.ipd  <- c.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(c.ipd, .)
+summary(c.mfit)
+
+plot(c.mfit,which=2)
+
+g.ipd <- ipd.mix  %>% dplyr::filter(Base=='G') %>% dplyr::mutate(IPDRatio=log10(IPDRatio)) %>% dplyr::select(Index,IPDRatio)
+g.mfit <- normalmixEM(g.ipd$IPDRatio,lambda=0.5,mu=c(1,4),sigma=c(1,2))
+g.ipd  <- g.mfit$posterior %>%  as.data.frame %>% dplyr::rename(unmodified=comp.1,modified=comp.2) %>% data.frame(g.ipd, .)
+summary(g.mfit)
+
+###
+atcg.ipd <- rbind(a.ipd,t.ipd,c.ipd,g.ipd)
+identical(nrow(ipd.mix),nrow(atcg.ipd))
+ipd.mix <- ipd.mix %>% 
+           left_join(atcg.ipd%>%dplyr::select(-IPDRatio),by=c('Index'='Index')) %>% 
+           dplyr::select(-Index) %>%
+           dplyr::rename(unmodified.lognorm=unmodified,modified.lognorm=modified)
+
+rm(a.ipd)
+rm(t.ipd)
+rm(g.ipd)
+rm(c.ipd)
+rm(atcg.ipd)
+rm(a.mfit)
+rm(t.mfit)
+rm(g.mfit)
+rm(c.mfit)
+```
+
+
+```{r }
+### Positive and negative controls have the same sequence
+match.pos <- str_locate_all(pattern ='GATC',ctrl.seq$Seq[1])[[1]][,'start']
+a.pos <- sort(c(match.pos+1,match.pos+2))
+  
+### A in GATC fwd = T in GATC rev
+a.plot <- ipd.mix %>% dplyr::filter(ID=='T4GlcHMC' | ID=='T4WGA') %>%
+dplyr::filter(Base=='A') %>%
+dplyr::mutate(Label=ifelse(ID=='T4GlcHMC',1,0)) %>%
+dplyr::filter(Pos %in% a.pos) %>%
+dplyr::select(modified.norm,Label)
+
+roc<-plot.roc(a.plot[,"Label",drop=TRUE], 
+              a.plot[,"modified.norm",drop=TRUE], 
+         main="A-in-GATC T4GlcHMC vs. T4WGA", 
+         percent=TRUE, col="#e41a1c",type="n",
+         print.auc=TRUE,print.auc.pattern="NormalMix AUC:%.1f%%",
+         #print.thres=TRUE,
+         print.auc.col="#e41a1c",print.auc.y=40)
+lines(smooth(roc, method = "binormal"), col="#e41a1c")
+legend("bottomright", legend = c("NormalMix"), 
+       col = c("#e41a1c"),lwd = 2)
+
+rm(a.plot)
+rm(match.pos)
+rm(a.pos)
+```
+
+
+```{r }
+### Positive and negative controls have the same sequence
+match.pos <- str_locate_all(pattern ='GATC',ctrl.seq$Seq[1])[[1]][,'start']
+a.pos <- sort(c(match.pos+1,match.pos+2))
+  
+### A in GATC fwd = T in GATC rev
+a.plot <- ipd.mix %>% dplyr::filter(ID=='T4C' | ID=='T4WGA') %>%
+dplyr::filter(Base=='A') %>%
+dplyr::mutate(Label=ifelse(ID=='T4C',1,0)) %>%
+dplyr::filter(Pos %in% a.pos) %>%
+dplyr::select(modified.norm,Label)
+
+  
+roc<-plot.roc(a.plot[,"Label",drop=TRUE], 
+              a.plot[,"modified.norm",drop=TRUE], 
+         main="A-in-GATC T4C vs. T4WGA", 
+         percent=TRUE, col="#e41a1c",type="n",
+         print.auc=TRUE,print.auc.pattern="NormalMix AUC:%.1f%%",
+         #print.thres=TRUE,
+         print.auc.col="#e41a1c",print.auc.y=40)
+lines(smooth(roc, method = "binormal"), col="#e41a1c")
+legend("bottomright", legend = c("NormalMix"), 
+       col = c("#e41a1c"),lwd = 2)
+
+rm(a.plot)
+rm(match.pos)
+rm(a.pos)
+```
